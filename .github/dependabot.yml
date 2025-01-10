@@ -1,0 +1,39 @@
+# https://help.github.com/github/administering-a-repository/configuration-options-for-dependency-updates
+
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directories:
+      - "/"
+      - "/.github/actions"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore(dependabot)"
+  - package-ecosystem: "gomod"
+    directory: "/"
+    labels:
+      - "go"
+      - "area/dependency"
+    schedule:
+      interval: "daily"
+    commit-message:
+      prefix: "chore(dependabot)"
+  - package-ecosystem: "gomod"
+    directory: "/api"
+    labels:
+      - "go"
+      - "area/dependency"
+    schedule:
+      interval: "daily"
+    commit-message:
+      prefix: "chore(dependabot)"
+  - package-ecosystem: "docker"
+    directory: "/"
+    labels:
+      - "docker"
+      - "area/dependency"
+    schedule:
+      interval: "daily"
+    commit-message:
+      prefix: "chore(dependabot)"

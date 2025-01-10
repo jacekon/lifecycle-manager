@@ -1,12 +1,8 @@
-# Adds namespace to all resources.
-namespace: kcp-system
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
 
-# Value of this field is prepended to the
-# names of all resources, e.g. a deployment named
-# "wordpress" becomes "alices-wordpress".
-# Note that it should also match with the prefix (text before '-') of the namespace
-# field above.
-namePrefix: lifecycle-manager-
+# Value of this field is prepended to the names of all resources
+namePrefix: klm-
 
 # Labels to add to all resources and selectors.
 commonLabels:
@@ -17,91 +13,55 @@ commonLabels:
   app.kubernetes.io/managed-by: kustomize
   app.kubernetes.io/part-of: manual-deployment
 
-patchesJson6902:
-  - patch: |-
-      - op: replace
-        path: /spec/serviceInfo/name
-        value: lifecycle-manager-event-service
-      - op: replace
-        path: /spec/serviceInfo/namespace
-        value: kcp-system
-    target:
-      group: operator.kyma-project.io
-      version: v1alpha1
-      kind: Watcher
-      name: watcher
-  - patch: |-
-      - op: replace
-        path: /metadata/namespace
-        value: default
-      - op: replace
-        path: /metadata/name
-        value: lifecycle-manager-watcher-gateway
-    target:
-      group: networking.istio.io
-      version: v1beta1
-      kind: Gateway
-      name: watcher-gateway
+
+patches:
+- path: manager_webhook_patch.yaml
 
 resources:
-  - ../manager
+- ../manager
+- ../certmanager
+- namespace_create.yaml
 
 components:
   - ../crd
-  - ../rbac
-  # [WATCHER] To enable the watcher, uncomment all the sections with [WATCHER]
-  #- ../watcher
+  - ../rbac/cluster_bindings
   # [ISTIO] To enable istio, uncomment all sections with 'ISTIO'.
   #- ../istio
   # [WEBHOOK] To enable webhook, uncomment all the sections with [WEBHOOK] prefix including the one in
   # crd/kustomization.yaml
-  #- ../webhook
-  # [CERTMANAGER] To enable cert-manager, uncomment all sections with 'CERTMANAGER'. 'WEBHOOK' components are required.
-  #- ../certmanager
+  - ../webhook
   # [PROMETHEUS] To enable prometheus monitor, uncomment all sections with 'PROMETHEUS'.
   #- ../prometheus
   # [GRAFANA] To generate configmap for provision grafana dashboard
   #- ../grafana
 
-# Mount the controller config file for loading manager configurations
-# through a ComponentConfig type
-#- manager_config_patch.yaml
-
-# [WEBHOOK] To enable webhook, uncomment all the sections with [WEBHOOK] prefix including the one in
-# crd/kustomization.yaml
-#- manager_webhook_patch.yaml
-
-# [CERTMANAGER] To enable cert-manager, uncomment all sections with 'CERTMANAGER'.
-# Uncomment 'CERTMANAGER' sections in crd/kustomization.yaml to enable the CA injection in the admission webhooks.
-# 'CERTMANAGER' needs to be enabled to use ca injection
-#- webhookcainjection_patch.yaml
-
-# the following config is for teaching kustomize how to do var substitution
-# vars:
-# [CERTMANAGER] To enable cert-manager, uncomment all sections with 'CERTMANAGER' prefix.
-#- name: CERTIFICATE_NAMESPACE # namespace of the certificate CR
-#  objref:
-#    kind: Certificate
-#    group: cert-manager.io
-#    version: v1
-#    name: serving-cert # this name should match the one in certificate.yaml
-#  fieldref:
-#    fieldpath: metadata.namespace
-#- name: CERTIFICATE_NAME
-#  objref:
-#    kind: Certificate
-#    group: cert-manager.io
-#    version: v1
-#    name: serving-cert # this name should match the one in certificate.yaml
-#- name: SERVICE_NAMESPACE # namespace of the service
-#  objref:
-#    kind: Service
-#    version: v1
-#    name: webhook-service
-#  fieldref:
-#    fieldpath: metadata.namespace
-#- name: SERVICE_NAME
-#  objref:
-#    kind: Service
-#    version: v1
-#    name: webhook-service
+transformers:
+- |-
+  apiVersion: builtin
+  kind: NamespaceTransformer
+  metadata:
+    name: adds-resources-to-kcp-system
+    namespace: kcp-system
+  unsetOnly: true
+  setRoleBindingSubjects: allServiceAccounts
+- |-
+  apiVersion: builtin
+  kind: AnnotationsTransformer
+  metadata:
+    name: add-ca-inject-annotation
+  annotations:
+    cert-manager.io/inject-ca-from: kcp-system/klm-controller-manager-webhook-serving
+  fieldSpecs:
+  - kind: CustomResourceDefinition
+    path: metadata/annotations
+- |-
+  apiVersion: builtin
+  kind: PatchTransformer
+  metadata:
+    name: fix-cert-dns-names
+  patch: '[{"op": "replace", "path": "/spec/dnsNames/0", "value": "klm-webhook-service.kcp-system.svc"}, {"op": "replace", "path": "/spec/dnsNames/1", "value": "klm-webhook-service.kcp-system.svc.cluster.local"}]'
+  target:
+    kind: Certificate
+    name: klm-controller-manager-webhook-serving
+    version: v1
+    group: cert-manager.io

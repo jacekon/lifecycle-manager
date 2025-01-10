@@ -6,20 +6,22 @@ import (
 	"strings"
 
 	"github.com/go-logr/logr"
-	"sigs.k8s.io/controller-runtime/pkg/client"
+	"k8s.io/apimachinery/pkg/util/validation"
 
-	"github.com/kyma-project/lifecycle-manager/api/v1alpha1"
+	"github.com/kyma-project/lifecycle-manager/api/shared"
+	"github.com/kyma-project/lifecycle-manager/api/v1beta2"
+	"github.com/kyma-project/lifecycle-manager/pkg/templatelookup"
 )
 
 type (
 	Modules []*Module
 	Module  struct {
-		ModuleName       string
-		FQDN             string
-		Version          string
-		Template         *v1alpha1.ModuleTemplate
-		TemplateOutdated bool
-		client.Object
+		ModuleName string
+		FQDN       string
+		Template   *templatelookup.ModuleTemplateInfo
+		*v1beta2.Manifest
+		Enabled     bool
+		IsUnmanaged bool
 	}
 )
 
@@ -32,36 +34,33 @@ func (m *Module) Logger(base logr.Logger) logr.Logger {
 	)
 }
 
-func (m *Module) ApplyLabelsAndAnnotations(
-	kyma *v1alpha1.Kyma,
-) {
+func (m *Module) ApplyDefaultMetaToManifest(kyma *v1beta2.Kyma) {
 	lbls := m.GetLabels()
 	if lbls == nil {
 		lbls = make(map[string]string)
 	}
-	lbls[v1alpha1.KymaName] = kyma.Name
-
+	lbls[shared.KymaName] = kyma.Name
 	templateLabels := m.Template.GetLabels()
 	if templateLabels != nil {
-		lbls[v1alpha1.ControllerName] = m.Template.GetLabels()[v1alpha1.ControllerName]
+		lbls[shared.ControllerName] = m.Template.GetLabels()[shared.ControllerName]
 	}
-	lbls[v1alpha1.ChannelLabel] = m.Template.Spec.Channel
-
+	lbls[shared.ModuleName] = m.ModuleName
+	lbls[shared.ChannelLabel] = m.Template.Spec.Channel
+	lbls[shared.ManagedBy] = shared.OperatorName
+	if m.Template.Spec.Mandatory {
+		lbls[shared.IsMandatoryModule] = shared.EnableLabelValue
+	}
 	m.SetLabels(lbls)
 
 	anns := m.GetAnnotations()
 	if anns == nil {
 		anns = make(map[string]string)
 	}
-	anns[v1alpha1.FQDN] = m.FQDN
+	anns[shared.FQDN] = m.FQDN
+	if m.IsUnmanaged {
+		anns[shared.UnmanagedAnnotation] = shared.EnableLabelValue
+	}
 	m.SetAnnotations(anns)
-}
-
-func (m *Module) StateMismatchedWithModuleStatus(moduleStatus *v1alpha1.ModuleStatus) bool {
-	templateStatusMismatch := m.TemplateOutdated &&
-		(moduleStatus.Template.Generation != m.Template.GetGeneration() ||
-			moduleStatus.Channel != m.Template.Spec.Channel)
-	return templateStatusMismatch || moduleStatus.Manifest.GetGeneration() != m.GetGeneration()
 }
 
 func (m *Module) ContainsExpectedOwnerReference(ownerName string) bool {
@@ -76,17 +75,17 @@ func (m *Module) ContainsExpectedOwnerReference(ownerName string) bool {
 	return false
 }
 
-const maxModuleNameLength = 253
+const maxModuleNameLength = validation.DNS1035LabelMaxLength
 
 // CreateModuleName takes a FQDN and a prefix and generates a human-readable unique interpretation of
 // a name combination.
 // e.g. kyma-project.io/module/some-module and default-id => "default-id-some-module-34180237"
 // e.g. domain.com/some-module and default-id => "default-id-some-module-1238916".
-func CreateModuleName(fqdn, prefix string) string {
+func CreateModuleName(fqdn, prefix, moduleName string) string {
 	splitFQDN := strings.Split(fqdn, "/")
 	lastPartOfFQDN := splitFQDN[len(splitFQDN)-1]
 	hash := fnv.New32()
-	_, _ = hash.Write([]byte(fqdn))
+	_, _ = hash.Write([]byte(fqdn + moduleName))
 	hashedFQDN := hash.Sum32()
 	name := fmt.Sprintf("%s-%s-%v", prefix, lastPartOfFQDN, hashedFQDN)
 	if len(name) >= maxModuleNameLength {

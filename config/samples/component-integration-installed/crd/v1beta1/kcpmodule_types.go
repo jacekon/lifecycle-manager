@@ -18,7 +18,7 @@ limitations under the License.
 package v1beta1
 
 import (
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	apimetav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
@@ -34,24 +34,23 @@ type RefTypeMetadata string
 
 // +genclient
 // +kubebuilder:object:root=true
-// +kubebuilder:storageversion
 // +kubebuilder:printcolumn:name="State",type=string,JSONPath=".status.state"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 // KCPModule is the Schema for the moduletemplates API.
 type KCPModule struct {
-	metav1.TypeMeta   `json:",inline"`
-	metav1.ObjectMeta `json:"metadata,omitempty"`
+	apimetav1.TypeMeta   `json:",inline"`
+	apimetav1.ObjectMeta `json:"metadata,omitempty"`
 
 	Spec   KCPModuleSpec   `json:"spec,omitempty"`
 	Status KCPModuleStatus `json:"status,omitempty"`
 }
 
-// +kubebuilder:validation:Enum=Processing;Deleting;Ready;Error
+// +kubebuilder:validation:Enum=Processing;Deleting;Ready;Error;Warning
 type KCPModuleState string
 
 // ManifestStatus defines the observed state of Manifest.
 type KCPModuleStatus struct {
-	// +kubebuilder:validation:Enum=Ready;Processing;Error;Deleting;
+	// +kubebuilder:validation:Enum=Ready;Processing;Error;Deleting;Warning
 	State KCPModuleState `json:"state"`
 }
 
@@ -59,7 +58,7 @@ type KCPModuleStatus struct {
 
 // KCPModuleList contains a list of KCPModule.
 type KCPModuleList struct {
-	metav1.TypeMeta `json:",inline"`
-	metav1.ListMeta `json:"metadata,omitempty"`
-	Items           []KCPModule `json:"items"`
+	apimetav1.TypeMeta `json:",inline"`
+	apimetav1.ListMeta `json:"metadata,omitempty"`
+	Items              []KCPModule `json:"items"`
 }

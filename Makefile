@@ -4,9 +4,10 @@ APP_NAME = lifecycle-manager
 IMG_REPO := $(DOCKER_PUSH_REPOSITORY)$(DOCKER_PUSH_DIRECTORY)
 IMG_NAME := $(IMG_REPO)/$(APP_NAME)
 IMG := $(IMG_NAME):$(DOCKER_TAG)
+BUILD_VERSION := from_makefile
 
 # ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
-ENVTEST_K8S_VERSION = 1.24.1
+ENVTEST_K8S_VERSION = 1.30.3
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -45,7 +46,7 @@ help: ## Display this help.
 
 .PHONY: manifests
 manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
-	$(CONTROLLER_GEN) rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases
+	$(CONTROLLER_GEN) rbac:roleName=controller-manager crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases output:rbac:dir=config/rbac/common
 
 .PHONY: test-crd
 test-crd: controller-gen ## Generate crd for test
@@ -64,8 +65,12 @@ envtest-dir:
 	echo "$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)"
 
 .PHONY: test
-test: manifests test-crd generate fmt vet envtest ## Run tests.
-	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" go test ./... -coverprofile cover.out
+test: unittest manifests test-crd generate fmt vet envtest ## Run tests.
+	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" go test `go list ./tests/integration/...` -ginkgo.flake-attempts 10
+
+.PHONY: unittest
+unittest: ## Run the unit test suite.
+	go test `go list ./... | grep -v /tests/` -coverprofile cover.out -coverpkg=./...
 
 .PHONY: dry-run
 dry-run: kustomize manifests
@@ -84,11 +89,11 @@ dry-run-control-plane: kustomize manifests
 
 .PHONY: build
 build: generate fmt vet ## Build manager binary.
-	go build -o bin/manager main.go flags.go
+	go build -ldflags="-X 'main.buildVersion=${BUILD_VERSION}'" -o bin/manager cmd/main.go
 
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
-	go run ./main.go ./flags.go
+	go run ./cmd/main.go
 
 .PHONY: docker-build
 docker-build: ## Build docker image with the manager.
@@ -119,14 +124,9 @@ uninstall: manifests kustomize ## Uninstall CRDs from the K8s cluster specified 
 deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in ~/.kube/config.
 	cd config/manager && $(KUSTOMIZE) edit set image controller=${IMG}
 	$(KUSTOMIZE) build config/default | kubectl apply -f -
-	
-.PHONY: lt-deploy
-lt-deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in ~/.kube/config.
-	cd config/manager && $(KUSTOMIZE) edit set image controller=${IMG}
-	$(KUSTOMIZE) build config/load_test | kubectl apply -f -
 
 .PHONY: local-deploy-with-watcher
-local-deploy-with-watcher: install manifests kustomize ## Deploy controller to the K8s cluster specified in ~/.kube/config.
+local-deploy-with-watcher: generate kustomize ## Deploy controller to the K8s cluster specified in ~/.kube/config.
 	cd config/manager && $(KUSTOMIZE) edit set image controller=${IMG}
 	$(KUSTOMIZE) build config/watcher_local_test | kubectl apply -f -
 
@@ -140,20 +140,21 @@ $(LOCALBIN):
 	mkdir -p $(LOCALBIN)
 
 ## Tool Binaries
+
 KUSTOMIZE ?= $(LOCALBIN)/kustomize
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANG_CI_LINT = $(LOCALBIN)/golangci-lint
 
 ## Tool Versions
-KUSTOMIZE_VERSION ?= v4.5.6
-CONTROLLER_TOOLS_VERSION ?= v0.11.2
-GOLANG_CI_LINT_VERSION ?= v1.51.1
+KUSTOMIZE_VERSION ?= v5.3.0
+CONTROLLER_TOOLS_VERSION ?= v0.14.0
+GOLANG_CI_LINT_VERSION ?= v1.60.3
 
 .PHONY: kustomize
 kustomize: $(KUSTOMIZE) ## Download kustomize locally if necessary.
 $(KUSTOMIZE): $(LOCALBIN)
-	GOBIN=$(LOCALBIN) go install sigs.k8s.io/kustomize/kustomize/v4@$(KUSTOMIZE_VERSION)
+	GOBIN=$(LOCALBIN) go install sigs.k8s.io/kustomize/kustomize/v5@$(KUSTOMIZE_VERSION)
 
 .PHONY: controller-gen
 controller-gen: $(CONTROLLER_GEN) ## Download controller-gen locally if necessary.
@@ -172,9 +173,6 @@ fmt: ## Run go fmt against code.
 .PHONY: lint
 lint: ## Run golangci-lint against code.
 	GOBIN=$(LOCALBIN) go install github.com/golangci/golangci-lint/cmd/golangci-lint@$(GOLANG_CI_LINT_VERSION)
-	$(LOCALBIN)/golangci-lint run
-
-.PHONY: grafana-dashboard
-grafana-dashboard: ## Generating Grafana manifests to visualize controller status.
-	kubebuilder edit --plugins grafana.kubebuilder.io/v1-alpha
-	mv grafana/* config/grafana
+	$(LOCALBIN)/golangci-lint run --verbose -c .golangci.yaml
+	pushd api; $(LOCALBIN)/golangci-lint run --verbose -c ../.golangci.yaml; popd
+	pushd maintenancewindows; $(LOCALBIN)/golangci-lint run --verbose -c ../.golangci.yaml; popd

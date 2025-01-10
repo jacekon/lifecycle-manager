@@ -11,33 +11,31 @@ import (
 	"strings"
 
 	"github.com/go-logr/logr"
-	"github.com/kyma-project/lifecycle-manager/pkg/log"
-
-	"github.com/kyma-project/lifecycle-manager/api/v1alpha1"
-
+	"github.com/kyma-project/runtime-watcher/listener/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/kyma-project/runtime-watcher/listener/pkg/types"
-
-	ctrl "sigs.k8s.io/controller-runtime"
+	"github.com/kyma-project/lifecycle-manager/api/v1beta2"
+	"github.com/kyma-project/lifecycle-manager/pkg/log"
 )
 
 const (
-	XFCCHeader           = "X-Forwarded-Client-Cert"
-	headerValueSeparator = ";"
-	keyValueSeparator    = "="
-	certificateKey       = "Cert="
-
+	XFCCHeader     = "X-Forwarded-Client-Cert"
+	certificateKey = "Cert="
 	shootDomainKey = "skr-domain"
+	limit32KiB     = 32 * 1024
+	limitSANValues = 100
 )
 
 var (
 
 	// Static errors.
-	errNotVerified   = errors.New("SAN from certificate does not match domain specified in KymaCR")
-	errPemDecode     = errors.New("failed to decode PEM block")
-	errEmptyCert     = errors.New("empty certificate")
-	errHeaderMissing = fmt.Errorf("request does not contain '%s' header", XFCCHeader)
+	errNotVerified        = errors.New("SAN from certificate does not match domain specified in KymaCR")
+	errPemDecode          = errors.New("failed to decode PEM block")
+	errEmptyCert          = errors.New("empty certificate")
+	errHeaderValueTooLong = errors.New(XFCCHeader + " header value too long (over 32KiB)")
+	errTooManySANValues   = errors.New("certificate contains too many SAN values (more than 100)")
+	errHeaderMissing      = fmt.Errorf("request does not contain '%s' header", XFCCHeader)
 )
 
 type RequestVerifier struct {
@@ -66,7 +64,12 @@ func (v *RequestVerifier) Verify(request *http.Request, watcherEvtObject *types.
 		return err
 	}
 
-	if v.VerifySAN(certificate, domain) {
+	ok, err := v.VerifySAN(certificate, domain)
+	if err != nil {
+		return err
+	}
+
+	if ok {
 		return nil
 	}
 	return errNotVerified
@@ -75,21 +78,18 @@ func (v *RequestVerifier) Verify(request *http.Request, watcherEvtObject *types.
 // getCertificateFromHeader extracts the XFCC header and pareses it into a valid x509 certificate.
 func (v *RequestVerifier) getCertificateFromHeader(r *http.Request) (*x509.Certificate, error) {
 	// Fetch XFCC-Header data
-	xfccValue, ok := r.Header[XFCCHeader]
+	xfccValues, ok := r.Header[XFCCHeader]
 	if !ok {
 		return nil, errHeaderMissing
 	}
-	xfccData := strings.Split(xfccValue[0], headerValueSeparator)
 
-	v.Log.Info(fmt.Sprintf("###### Request Header %v", xfccValue))
-	// Extract raw certificate
-	var cert string
-	for _, keyValuePair := range xfccData {
-		if strings.Contains(keyValuePair, certificateKey) {
-			cert = strings.Split(keyValuePair, keyValueSeparator)[1]
-			break
-		}
+	// Limit the length of the data (prevent resource exhaustion attack)
+	if len(xfccValues[0]) > limit32KiB {
+		return nil, errHeaderValueTooLong
 	}
+
+	// Extract raw certificate from the first header value
+	cert := getCertTokenFromXFCCHeader(xfccValues[0])
 	if cert == "" {
 		return nil, errEmptyCert
 	}
@@ -110,17 +110,15 @@ func (v *RequestVerifier) getCertificateFromHeader(r *http.Request) (*x509.Certi
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse PEM block into x509 certificate: %w", err)
 	}
-	v.Log.V(log.DebugLevel).Info(XFCCHeader,
-		"certificate", certificate)
 
 	return certificate, nil
 }
 
 // getDomain fetches the KymaCR, mentioned in the requests body, and returns the value of the SKR-Domain annotation.
 func (v *RequestVerifier) getDomain(request *http.Request, watcherEvtObject *types.WatchEvent) (string, error) {
-	var kymaCR v1alpha1.Kyma
+	var kymaCR v1beta2.Kyma
 	if err := v.Client.Get(request.Context(), watcherEvtObject.Owner, &kymaCR); err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to get Kyma CR: %w", err)
 	}
 	domain, ok := kymaCR.Annotations[shootDomainKey]
 	if !ok {
@@ -133,14 +131,23 @@ func (v *RequestVerifier) getDomain(request *http.Request, watcherEvtObject *typ
 }
 
 // VerifySAN checks if given domain exists in the SAN information of the given certificate.
-func (v *RequestVerifier) VerifySAN(certificate *x509.Certificate, kymaDomain string) bool {
-	if contains(certificate.URIs, kymaDomain) ||
-		contains(certificate.DNSNames, kymaDomain) ||
-		contains(certificate.IPAddresses, kymaDomain) {
-		v.Log.V(log.DebugLevel).Info("Received request verified")
-		return true
+func (v *RequestVerifier) VerifySAN(certificate *x509.Certificate, kymaDomain string) (bool, error) {
+	uris := certificate.URIs
+	dnsNames := certificate.DNSNames
+	IPAddresses := certificate.IPAddresses
+
+	if (len(uris) + len(dnsNames) + len(IPAddresses)) > limitSANValues {
+		return false, errTooManySANValues
 	}
-	return false
+
+	if contains(uris, kymaDomain) ||
+		contains(dnsNames, kymaDomain) ||
+		contains(IPAddresses, kymaDomain) {
+		v.Log.V(log.DebugLevel).Info("Received request verified")
+		return true, nil
+	}
+
+	return false, nil
 }
 
 // contains checks if given string is present in slice.
@@ -161,4 +168,23 @@ type AnnotationMissingError struct {
 
 func (e AnnotationMissingError) Error() string {
 	return fmt.Sprintf("KymaCR '%s' does not have annotation `%s`", e.KymaCR, e.Annotation)
+}
+
+// getCertTokenFromXFCCHeader returns the first certificate embedded in the XFFC Header, if exists.
+// Otherwise an empty string is returned.
+func getCertTokenFromXFCCHeader(hVal string) string {
+	certStartIdx := strings.Index(hVal, certificateKey)
+	if certStartIdx >= 0 {
+		tokenWithCert := hVal[(certStartIdx + len(certificateKey)):]
+		// we shouldn't have "," here but it's safer to add it anyway
+		certEndIdx := strings.IndexAny(tokenWithCert, ";,")
+		if certEndIdx == -1 {
+			// no suffix, the entire token is the cert value
+			return tokenWithCert
+		}
+
+		// there's some data after the cert value, return just the cert part
+		return tokenWithCert[:certEndIdx]
+	}
+	return ""
 }
