@@ -1,177 +1,182 @@
 package testutils
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
-	"math/rand"
-	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
-	"runtime"
 	"time"
 
-	"github.com/kyma-project/lifecycle-manager/api/v1alpha1"
-	"github.com/onsi/gomega"
-
-	v12 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	certmanagerv1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	apicorev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apimetav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/util/yaml"
-
+	k8slabels "k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/runtime/serializer"
+	machineryaml "k8s.io/apimachinery/pkg/util/yaml"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/kyma-project/lifecycle-manager/api/shared"
+	"github.com/kyma-project/lifecycle-manager/api/v1beta2"
+	"github.com/kyma-project/lifecycle-manager/pkg/testutils/random"
 )
 
 const (
-	randomStringLength = 8
-	letterBytes        = "abcdefghijklmnopqrstuvwxyz"
-	defaultBufferSize  = 2048
-	httpClientTimeout  = 2 * time.Second
-	Timeout            = time.Second * 10
-	Interval           = time.Millisecond * 250
+	defaultBufferSize      = 2048
+	Timeout                = time.Second * 10
+	ConsistentCheckTimeout = time.Second * 10
+	Interval               = time.Millisecond * 250
 )
 
-func NewTestKyma(name string) *v1alpha1.Kyma {
-	return &v1alpha1.Kyma{
-		TypeMeta: v1.TypeMeta{
-			APIVersion: v1alpha1.GroupVersion.String(),
-			Kind:       string(v1alpha1.KymaKind),
+var (
+	ErrNotFound                   = errors.New("resource does not exist")
+	ErrNotDeleted                 = errors.New("resource has not been deleted")
+	ErrDeletionTimestampFound     = errors.New("deletion timestamp not nil")
+	ErrSampleCrNotInExpectedState = errors.New("resource not in expected state")
+	ErrFetchingStatus             = errors.New("could not fetch status from resource")
+)
+
+func NewTestModule(name, channel string) v1beta2.Module {
+	return NewTestModuleWithFixName(fmt.Sprintf("%s-%s", name, random.Name()), channel, "")
+}
+
+func NewTestModuleWithChannelVersion(name, channel, version string) v1beta2.Module {
+	return NewTestModuleWithFixName(fmt.Sprintf("%s-%s", name, random.Name()), channel, version)
+}
+
+func NewTemplateOperatorWithVersion(version string) v1beta2.Module {
+	return NewTestModuleWithFixName(TestModuleName, "", version)
+}
+
+func NewTemplateOperator(channel string) v1beta2.Module {
+	return NewTestModuleWithFixName(TestModuleName, channel, "")
+}
+
+func NewTestModuleWithFixName(name, channel, version string) v1beta2.Module {
+	return v1beta2.Module{
+		Name:    name,
+		Channel: channel,
+		Managed: true,
+		Version: version,
+	}
+}
+
+func NewTestIssuer(namespace string) *certmanagerv1.Issuer {
+	return &certmanagerv1.Issuer{
+		ObjectMeta: apimetav1.ObjectMeta{
+			Name:      "test-issuer",
+			Namespace: namespace,
+			Labels: k8slabels.Set{
+				shared.PurposeLabel: shared.CertManager,
+				shared.ManagedBy:    shared.OperatorName,
+			},
 		},
-		ObjectMeta: v1.ObjectMeta{
-			Name:      fmt.Sprintf("%s-%s", name, randString(randomStringLength)),
-			Namespace: v1.NamespaceDefault,
-		},
-		Spec: v1alpha1.KymaSpec{
-			Modules: []v1alpha1.Module{},
-			Channel: v1alpha1.DefaultChannel,
+		Spec: certmanagerv1.IssuerSpec{
+			IssuerConfig: certmanagerv1.IssuerConfig{
+				SelfSigned: &certmanagerv1.SelfSignedIssuer{},
+			},
 		},
 	}
 }
 
-func NewUniqModuleName() string {
-	return randString(randomStringLength)
-}
-
-func randString(n int) string {
-	b := make([]byte, n)
-	for i := range b {
-		b[i] = letterBytes[rand.Intn(len(letterBytes))] //nolint:gosec
-	}
-	return string(b)
-}
-
-func DeployModuleTemplates(ctx context.Context, kcpClient client.Client, kyma *v1alpha1.Kyma) {
-	for _, module := range kyma.Spec.Modules {
-		template, err := ModuleTemplateFactory(module, unstructured.Unstructured{})
-		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
-		gomega.Expect(kcpClient.Create(ctx, template)).To(gomega.Succeed())
+func NewTestNamespace(namespace string) *apicorev1.Namespace {
+	return &apicorev1.Namespace{
+		ObjectMeta: apimetav1.ObjectMeta{
+			Name: namespace,
+		},
 	}
 }
 
-func DeleteModuleTemplates(ctx context.Context, kcpClient client.Client, kyma *v1alpha1.Kyma) {
-	for _, module := range kyma.Spec.Modules {
-		template, err := ModuleTemplateFactory(module, unstructured.Unstructured{})
-		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
-		gomega.Expect(kcpClient.Delete(ctx, template)).To(gomega.Succeed())
-	}
-}
-
-func GetKyma(ctx context.Context, testClient client.Client, name, namespace string) (*v1alpha1.Kyma, error) {
-	kymaInCluster := &v1alpha1.Kyma{}
-	if namespace == "" {
-		namespace = v1.NamespaceDefault
-	}
-	err := testClient.Get(ctx, client.ObjectKey{
-		Namespace: namespace,
-		Name:      name,
-	}, kymaInCluster)
-	if err != nil {
-		return nil, err
-	}
-	return kymaInCluster, nil
-}
-
-func IsKymaInState(ctx context.Context, kcpClient client.Client, kymaName string, state v1alpha1.State) func() bool {
-	return func() bool {
-		kymaFromCluster, err := GetKyma(ctx, kcpClient, kymaName, "")
-		if err != nil || kymaFromCluster.Status.State != state {
-			return false
-		}
-		return true
-	}
-}
-
-func ParseRemoteCRDs(testCrdURLs []string) ([]*v12.CustomResourceDefinition, error) {
-	var crds []*v12.CustomResourceDefinition
-	var httpResponse *http.Response
-	for _, testCrdURL := range testCrdURLs {
-		_, err := url.Parse(testCrdURL)
+func AppendExternalCRDs(path string, files ...string) ([]*apiextensionsv1.CustomResourceDefinition, error) {
+	var crds []*apiextensionsv1.CustomResourceDefinition
+	for _, file := range files {
+		crdPath := filepath.Join(path, file)
+		moduleFile, err := os.Open(crdPath)
 		if err != nil {
 			return nil, err
 		}
-		request, err := http.NewRequestWithContext(context.Background(), http.MethodGet, testCrdURL, nil)
-		if err != nil {
-			return nil, fmt.Errorf("failed pulling content for URL (%s) :%w", testCrdURL, err)
-		}
-		httpClient := &http.Client{Timeout: httpClientTimeout}
-		httpResponse, err = httpClient.Do(request)
-		if err != nil {
-			return nil, err
-		}
-		if httpResponse.StatusCode != http.StatusOK {
-			//nolint:goerr113
-			return nil, fmt.Errorf("failed pulling content for URL (%s) with status code: %d",
-				testCrdURL, httpResponse.StatusCode)
-		}
-
-		decoder := yaml.NewYAMLOrJSONDecoder(httpResponse.Body, defaultBufferSize)
+		decoder := machineryaml.NewYAMLOrJSONDecoder(moduleFile, defaultBufferSize)
 		for {
-			crd := &v12.CustomResourceDefinition{}
-			err = decoder.Decode(crd)
-			if err == nil {
-				crds = append(crds, crd)
+			crd := &apiextensionsv1.CustomResourceDefinition{}
+			if err = decoder.Decode(crd); err != nil {
+				if errors.Is(err, io.EOF) {
+					break
+				}
+				continue
 			}
-			if errors.Is(err, io.EOF) {
-				break
-			}
+			crds = append(crds, crd)
 		}
 	}
-	defer func() {
-		_ = httpResponse.Body.Close()
-	}()
 	return crds, nil
 }
 
-func ModuleTemplateFactory(module v1alpha1.Module, data unstructured.Unstructured) (*v1alpha1.ModuleTemplate, error) {
-	var moduleTemplate v1alpha1.ModuleTemplate
-	err := readModuleTemplate(&moduleTemplate)
-	if err != nil {
-		return &moduleTemplate, err
+func DeletionTimeStampExists(ctx context.Context, group, version, kind, name, namespace string,
+	clnt client.Client,
+) (bool, error) {
+	sampleCR := &unstructured.Unstructured{}
+	sampleCR.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   group,
+		Version: version,
+		Kind:    kind,
+	})
+	if err := clnt.Get(ctx,
+		client.ObjectKey{Name: name, Namespace: namespace}, sampleCR); err != nil {
+		return false, err
 	}
-	moduleTemplate.Name = module.Name
-	moduleTemplate.Labels[v1alpha1.ModuleName] = module.Name
-	moduleTemplate.Labels[v1alpha1.ControllerName] = module.ControllerName
-	moduleTemplate.Spec.Channel = module.Channel
-	if data.GetKind() != "" {
-		moduleTemplate.Spec.Data = data
+
+	_, deletionTimestampExists, err := unstructured.NestedString(sampleCR.Object,
+		"metadata", "deletionTimestamp")
+	if err != nil || !deletionTimestampExists {
+		return deletionTimestampExists, err
 	}
-	return &moduleTemplate, nil
+
+	return deletionTimestampExists, err
 }
 
-func readModuleTemplate(moduleTemplate *v1alpha1.ModuleTemplate) error {
-	template := "operator_v1alpha1_moduletemplate_kcp-module.yaml"
-	_, filename, _, ok := runtime.Caller(1)
-	if !ok {
-		panic("Can't capture current filename!")
-	}
-	modulePath := filepath.Join(filepath.Dir(filename), "../../config/samples/component-integration-installed", template)
-
-	moduleFile, err := os.ReadFile(modulePath)
+func ApplyYAML(ctx context.Context, clnt client.Client, yamlFilePath string) error {
+	resources, err := parseResourcesFromYAML(yamlFilePath, clnt)
 	if err != nil {
 		return err
 	}
-	err = yaml.Unmarshal(moduleFile, &moduleTemplate)
-	return err
+
+	for _, object := range resources {
+		err := clnt.Patch(ctx, object, client.Apply, client.ForceOwnership, client.FieldOwner(shared.OperatorName))
+		if err != nil {
+			return fmt.Errorf("error applying patch to resource %s/%s: %w",
+				object.GetNamespace(), object.GetName(), err)
+		}
+	}
+
+	return nil
+}
+
+func parseResourcesFromYAML(yamlFilePath string, clnt client.Client) ([]*unstructured.Unstructured, error) {
+	fileContent, err := os.ReadFile(yamlFilePath)
+	if err != nil {
+		return nil, fmt.Errorf("error reading YAML file '%s': %w", yamlFilePath, err)
+	}
+	yamlDocs := bytes.Split(fileContent, []byte("---"))
+
+	decoder := serializer.NewCodecFactory(clnt.Scheme()).UniversalDeserializer()
+	resources := make([]*unstructured.Unstructured, 0, len(yamlDocs))
+
+	for _, doc := range yamlDocs {
+		if len(doc) == 0 {
+			continue
+		}
+
+		obj := &unstructured.Unstructured{}
+		_, _, err := decoder.Decode(doc, nil, obj)
+		if err != nil {
+			return nil, fmt.Errorf("error decoding YAML document: %w", err)
+		}
+
+		resources = append(resources, obj)
+	}
+	return resources, nil
 }

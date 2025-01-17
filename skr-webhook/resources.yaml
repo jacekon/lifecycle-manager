@@ -26,29 +26,36 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
 ---
 apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: skr-webhook-config
-data:
-  contractVersion: v1
-  kcpAddr: "kcp-base-url-invalid"
-  # -- TLS webhook server
-  tlsWebhookServer: "true"
-  # -- TLS callback to KCP
-  tlsCallback: "true"
----
-apiVersion: v1
 kind: Service
 metadata:
   name: skr-webhook
 spec:
   selector:
-    #selector for deployment labels (key, values)
     app: skr-webhook
   ports:
     - port: 443
       targetPort: watcher-port
       name: webhook
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: skr-webhook-metrics
+spec:
+  selector:
+    app: skr-webhook
+  ports:
+    - port: 2112
+      targetPort: metrics-port
+      name: http-metrics
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: skr-webhook-priority
+value: 1000000000
+globalDefault: false
+description: "This priority class is used for skr-webhook to ensure reconciliation, even with high workload."
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -67,6 +74,7 @@ spec:
       labels:
         app: skr-webhook
         operator.kyma-project.io/pod-restart-trigger: ""
+        sidecar.istio.io/inject: "false"
     spec:
       serviceAccountName: skr-webhook-sa
       containers:
@@ -78,41 +86,25 @@ spec:
                   fieldPath: metadata.name
             - name: WEBHOOK_PORT
               value: "8443"
-            - name: TLS_SERVER
-              valueFrom:
-                configMapKeyRef:
-                  name: skr-webhook-config
-                  key: tlsWebhookServer
-            - name: TLS_CALLBACK
-              valueFrom:
-                configMapKeyRef:
-                  name: skr-webhook-config
-                  key: tlsCallback
+            - name: METRICS_PORT
+              value: "2112"
             - name: TLS_KEY
               value: "/app/etc/ssl/tls.key"
             - name: TLS_CERT
               value: "/app/etc/ssl/tls.crt"
             - name: CA_CERT
               value: "/app/etc/ssl/ca.crt"
-            - name: KCP_ADDR
-              valueFrom:
-                configMapKeyRef:
-                  name: skr-webhook-config
-                  key: kcpAddr
-            - name: KCP_CONTRACT
-              valueFrom:
-                configMapKeyRef:
-                  name: skr-webhook-config
-                  key: contractVersion
-            - name: WEBHOOK_SIDE_CAR
+            - name: TLS_CALLBACK
               value: "true"
-          image: "eu.gcr.io/kyma-project/runtime-watcher-skr:latest"
+            - name: KCP_CONTRACT
+              value: "v1"
+            - name: KCP_ADDR
+              value: "kcp-base-url-invalid"
+          image: "europe-docker.pkg.dev/kyma-project/prod/runtime-watcher:latest" # this image will be dynamically replaced by flags
           imagePullPolicy: Always
           volumeMounts:
             - name: ssl
               mountPath: /app/etc/ssl
-            - name: request
-              mountPath: /tmp
           resources:
             requests:
               memory: 20Mi
@@ -123,16 +115,8 @@ spec:
           ports:
             - containerPort: 8443
               name: watcher-port
-        - name: request-sidecar
-          image: alpine
-          command:
-            - /bin/sh
-            - "-c"
-            - "sleep 60m"
-          imagePullPolicy: Always
-          volumeMounts:
-            - name: request
-              mountPath: /tmp
+            - containerPort: 2112
+              name: metrics-port
       volumes:
         - name: ssl
           secret:
@@ -144,5 +128,4 @@ spec:
                 path: tls.crt
               - key: ca.crt
                 path: ca.crt
-        - name: request
-          emptyDir: {}
+      priorityClassName: skr-webhook-priority
