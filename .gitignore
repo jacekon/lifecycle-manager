@@ -21,7 +21,6 @@
 atlassian-ide-plugin.xml
 
 ## VSCode
-**/*.vscode
 **/*.devcontainer*
 
 ### OSX template
@@ -81,7 +80,6 @@ out.txt
 # ignore vscode delve debug binary
 **/__debug_bin
 
-.run/
 /config/crd/bases/operator.kyma-project.io*
 .test.env
 **/**.code-workspace
