@@ -1,16 +1,19 @@
 name: TestSuite integration and unit tests
 
+permissions: { }
+
 on:
   pull_request:
     branches:
       - main
       - feat/**
+
 jobs:
   envtest-and-unittest:
     name: "Run 'make test'"
     runs-on: ubuntu-latest
     env:
-      GOSUMDB: off
+      GOSUMDB: sum.golang.org
     steps:
       - name: Checkout lifecycle-manager
         uses: actions/checkout@v4
